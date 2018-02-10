@@ -1,0 +1,256 @@
+```{r}
+library(twitteR)
+library(ROAuth)
+library(tidyverse)
+library(purrrlyr)
+library(text2vec)
+library(caret)
+library(glmnet)
+library(dplyr)
+library(plyr)
+require(ggrepel)
+```
+
+
+
+```{r}
+### loading and preprocessing a training set of tweets
+# function for converting some symbols
+conv_fun <- function(x) iconv(x, "latin1", "ASCII", "")
+ 
+```
+
+
+##### loading classified tweets ######
+# source: http://help.sentiment140.com/for-students/
+# 0 - the polarity of the tweet (0 = negative, 4 = positive)
+# 1 - the id of the tweet
+# 2 - the date of the tweet
+# 3 - the query. If there is no query, then this value is NO_QUERY.
+# 4 - the user that tweeted
+# 5 - the text of the tweet
+
+
+```{r}
+tweets_classified <- read_csv('D:/Users/Kartik Rajput/Downloads/training.1600000.processed.noemoticon.csv', col_names = c('sentiment', 'id', 'date', 'query', 'user', 'text')) %>%
+ # converting some symbols
+ dmap_at('text', conv_fun)%>%
+ # replacing class values<span data-mce-type="bookmark" style="display: inline-block; width: 0px; overflow: hidden; line-height: 0;" class="mce_SELRES_start"></span>
+ mutate(sentiment = ifelse(sentiment == 0, 0, 1))
+
+#sum(is.na(tweets_classified_new))
+# there are some tweets with NA ids that we replace with dummies
+#tweets_classified_na <- tweets_classified %>% filter(is.na(id) == TRUE) %>% mutate(id = c(1:n()))
+
+tweets_classified_new <- na.omit(tweets_classified)
+```
+
+
+```{r}
+# data splitting on train and test
+set.seed(2340)
+trainIndex <- createDataPartition(tweets_classified_new$sentiment, p = 0.8, 
+ list = FALSE, 
+ times = 1)
+tweets_train <- tweets_classified_new[trainIndex, ]
+tweets_test <- tweets_classified_new[-trainIndex, ]
+```
+
+
+```{r}
+##### Vectorization #####
+# define preprocessing function and tokenization function
+prep_fun <- tolower
+tok_fun <- word_tokenizer
+ 
+
+it_train <- itoken(tweets_train$text, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_train$id,
+ progressbar = TRUE)
+
+# creating vocabulary and document-term matrix
+vocab <- create_vocabulary(it_train)
+
+
+it_test <- itoken(tweets_test$text, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_test$id,
+ progressbar = TRUE)
+
+# creating vocabulary and document-term matrix
+vectorizer <- vocab_vectorizer(vocab)
+
+
+
+
+dtm_train <- create_dtm(it_train, vectorizer)
+dtm_test <- create_dtm(it_test, vectorizer)
+
+
+# define tf-idf model
+tfidf <- TfIdf$new()
+
+# fit the model to the train data and transform it with the fitted model
+dtm_train_tfidf <- fit_transform(dtm_train, tfidf)
+dtm_test_tfidf <- fit_transform(dtm_test, tfidf)
+```
+
+```{r}
+# train the model
+t1 <- Sys.time()
+glmnet_classifier <- cv.glmnet(x = dtm_train_tfidf,
+ y = tweets_train$sentiment, 
+ family = 'binomial', 
+ # L1 penalty
+ alpha = 1,
+ # interested in the area under ROC curve
+ type.measure = "auc",
+ # 5-fold cross-validation
+ nfolds = 5,
+ # high value is less accurate, but has faster training
+ thresh = 1e-3,
+ # again lower number of iterations for faster training
+ maxit = 1e2)
+print(difftime(Sys.time(), t1, units = 'mins'))
+print(glmnet_classifier)
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+ 
+preds <- predict(glmnet_classifier, dtm_test_tfidf, type = 'response')[ ,1]
+auc(as.numeric(tweets_test$sentiment), preds)
+ 
+# save the model for future using
+saveRDS(glmnet_classifier, 'glmnet_classifier123.RDS')
+
+```
+
+```{r}
+
+tweets_2<-read.csv2("D:/Users/Kartik Rajput/Desktop/Twitter Project/tweets_galaxy_8_9.csv", sep = '\t',col.names = c ('Id','User_id','Created_at','Source','Tweet_text','Hastag'),encoding = "ASCII,Latin1,UTF-8") 
+tweets_1<-read.csv2("D:/Users/Kartik Rajput/Desktop/Twitter Project/tweets_iphone_x_0.csv", sep = '\t',encoding = "ASCII,Latin1,UTF-8",col.names = c ('Id','User_id','Created_at','Source','Tweet_text','Hastag'))
+
+tweets_2$labels<-"Android"
+tweets_1$labels<-"iPhone"
+tweets_2<-rbind.data.frame((tweets_1),tweets_2)
+
+
+
+
+tweets_2$Source<-gsub("(.*)Twitter(.*)for(.*)Android(.*)","Android",tweets_2$Source)
+tweets_2$Source<-gsub("(.*)Twitter(.*)for(.*)iPhone(.*)","iPhone",tweets_2$Source)
+
+tweets.clean=tweets_2[tweets_2$Source %in% c('Android','iPhone'),]
+
+
+
+```
+
+```{r}
+it_tweets <- itoken(as.vector(tweets.clean$Tweet_text),
+preprocessor = prep_fun,
+tokenizer = tok_fun,
+ids = tweets.clean$id,
+progressbar = TRUE)
+ 
+# creating vocabulary and document-term matrix
+dtm_tweets <- create_dtm(it_tweets, vectorizer)
+ 
+# transforming data with tf-idf
+dtm_tweets_tfidf <- fit_transform(dtm_tweets, tfidf)
+ 
+# loading classification model
+glmnet_classifier <- readRDS('glmnet_classifier123.RDS')
+ 
+# predict probabilities of positiveness
+preds_tweets <- predict(glmnet_classifier, dtm_tweets_tfidf, type = 'response')[ ,1]
+ 
+# adding rates to initial dataset
+tweets.clean$sentiment <- preds_tweets
+
+```
+
+
+
+```{r}
+tweets.clean$polarity<-tweets.clean$sentiment
+
+negative_tweets <- subset(tweets.clean, tweets.clean$sentiment>=0 & tweets.clean$sentiment<0.35)
+negative_tweets$polarity <- "negative"
+
+neutral_tweets <- subset(tweets.clean, tweets.clean$sentiment>=0.35 & tweets.clean$sentiment<0.65)
+neutral_tweets$polarity <- "neutral" 
+
+positive_tweets <- subset(tweets.clean, tweets.clean$sentiment>=0.65 & tweets.clean$sentiment<=1.0)
+positive_tweets$polarity <- "positive" 
+
+
+explor_tweets <- rbind(negative_tweets,neutral_tweets,positive_tweets)
+#View(explor_tweets)
+
+tweets_andr<-explor_tweets[explor_tweets$labels=="Android",]
+tweets_iph<-explor_tweets[explor_tweets$labels=="iPhone",]
+
+
+Total<-table(explor_tweets$Source,explor_tweets$polarity)
+mosaicplot(Total,main = "Android V/s Iphone",col = c(2,3,4),xlab = "Source",ylab = "Polarity")
+table(explor_tweets$polarity)
+
+
+Total_andr<-table(tweets_andr$Source,tweets_andr$polarity)
+mosaicplot(Total_andr,main = "Android Label",col = c(2,3,4),xlab = "Source",ylab = "Polarity",shade = TRUE)
+table(tweets_andr$polarity)
+
+
+
+
+
+Total_iphn<-table(tweets_iph$Source,tweets_iph$polarity)
+mosaicplot(Total_iphn,main = "Iphone Label",col = c(2,3,4),xlab = "Source",ylab = "Polarity")
+
+```
+
+
+
+
+
+
+
+```{r}
+# color palette
+cols <- c("#ce472e", "#f05336", "#ffd73e", "#eec73a", "#4ab04a")
+ 
+set.seed(932)
+samp_ind <- sample(c(1:nrow(tweets.clean)), nrow(tweets.clean) * 0.1) # 10% for labeling
+ 
+# plotting
+ggplot(tweets.clean, aes(x = Created_at, y = sentiment, color = sentiment)) +
+theme_minimal() +
+scale_color_gradientn(colors = cols, limits = c(0, 1),
+breaks = seq(0, 1, by = 1/4),
+labels = c("0", round(1/4*1, 1), round(1/4*2, 1), round(1/4*3, 1), round(1/4*4, 1)),
+guide = guide_colourbar(ticks = T, nbin = 30, barheight = .3, label = T, barwidth = 8)) +
+geom_point(aes(color = sentiment), alpha = 0.8) +
+geom_hline(yintercept = 0.65, color = "#4ab04a", size = 1.5, alpha = 0.6, linetype = "longdash") +
+geom_hline(yintercept = 0.35, color = "#f05336", size = 1.5, alpha = 0.6, linetype = "longdash") +
+geom_smooth(size = 1.2, alpha = 0.2) +
+geom_label_repel(data = tweets.clean[samp_ind, ],
+aes(label = round(sentiment, 2)),
+fontface = 'bold',
+size = 1.5,
+max.iter = 100) +
+theme(legend.position = 'bottom',
+legend.direction = "horizontal",
+panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(),
+plot.title = element_text(size = 20, face = "bold", vjust = 2, color = 'black', lineheight = 0.8),
+axis.title.x = element_text(size = 16),
+axis.title.y = element_text(size = 16),
+axis.text.y = element_text(size = 8, face = "bold", color = 'black'),
+axis.text.x = element_text(size = 8, face = "bold", color = 'black')) +
+ggtitle("Tweets Sentiment rate (probability of positiveness)")
+```
+
+
