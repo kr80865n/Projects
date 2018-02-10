@@ -1,0 +1,136 @@
+---
+title: "Sample of Blog Text2Vec"
+author: "Kartik"
+date: "November 2, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+
+# loading packages
+#install.packages("twitteR")
+#install.packages("ROAuth")
+#install.packages("tidyverse")#,"purrrlyr","text2vec")
+library(twitteR)
+library(ROAuth)
+library(tidyverse)
+library(purrrlyr)
+library(text2vec)
+library(caret)
+library(glmnet)
+library(ggrepel)
+ 
+### loading and preprocessing a training set of tweets
+# function for converting some symbols
+conv_fun <- function(x) iconv(x, "latin1", "ASCII", "")
+ 
+##### loading classified tweets ######
+# source: http://help.sentiment140.com/for-students/
+# 0 - the polarity of the tweet (0 = negative, 4 = positive)
+# 1 - the id of the tweet
+# 2 - the date of the tweet
+# 3 - the query. If there is no query, then this value is NO_QUERY.
+# 4 - the user that tweeted
+# 5 - the text of the tweet
+ 
+tweets_classified1 <- read_csv('training.1600000.processed.noemoticon.csv',
+ col_names = c('sentiment', 'id', 'date', 'query', 'user', 'text')) %>%
+ # converting some symbols
+ dmap_at('text', conv_fun) %>%
+ # replacing class values
+ mutate(sentiment = ifelse(sentiment == 0, 0, 1))
+
+
+# there are some tweets with NA ids that we replace with dummies
+tweets_classified_na <- tweets_classified1 %>%
+ filter(is.na(id) == TRUE) #%>%
+ #mutate(id = c(1:n()))
+tweets_classified1 <- tweets_classified1 %>%
+ filter(!is.na(id)) %>%
+ rbind(., tweets_classified_na)
+#View(head(tweets_classified,n=1000))
+```
+
+
+
+```{r}
+# data splitting on train and test
+set.seed(2340)
+trainIndex_1 <- createDataPartition(tweets_classified1$sentiment, p = 0.8, 
+ list = FALSE, 
+ times = 1)
+tweets_train1 <- tweets_classified1[trainIndex_1, ]
+tweets_test1 <- tweets_classified1[-trainIndex_1, ]
+summary(tweets_train1)
+unique(tweets_test1$sentiment)
+```
+
+```{r}
+##### Vectorization #####
+# define preprocessing function and tokenization function
+prep_fun <- tolower
+tok_fun <- word_tokenizer
+ 
+it_train1 <- itoken(tweets_train1$text, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_train1$id,
+ progressbar = TRUE)
+it_test1 <- itoken(tweets_test1$text, 
+ preprocessor = prep_fun, 
+ tokenizer = tok_fun,
+ ids = tweets_test1$id,
+ progressbar = TRUE)
+
+typeof(tweets_test1$id)
+```
+
+```{r}
+# creating vocabulary and document-term matrix
+vocab1 <- create_vocabulary(it_train1)
+vectorizer1 <- vocab_vectorizer(vocab1)
+dtm_train1 <- create_dtm(it_train1, vectorizer1)
+dtm_test1 <- create_dtm(it_test1, vectorizer1)
+# define tf-idf model
+tfidf1 <- TfIdf$new()
+# fit the model to the train data and transform it with the fitted model
+dtm_train_tfidf1 <- fit_transform(dtm_train1, tfidf1)
+dtm_test_tfidf1 <- fit_transform(dtm_test1, tfidf1)
+
+
+typeof(dtm_train1)
+str(tweets_classified1)
+```
+
+```{r}
+# train the model
+t1 <- Sys.time()
+glmnet_classifier1 <- cv.glmnet(x = dtm_train_tfidf1,
+ y = tweets_train1[['sentiment']], 
+ family = 'binomial', 
+ # L1 penalty
+ alpha = 1,
+ # interested in the area under ROC curve
+ type.measure = "auc",
+ # 5-fold cross-validation
+ nfolds = 5,
+ # high value is less accurate, but has faster training
+ thresh = 1e-3,
+ # again lower number of iterations for faster training
+ maxit = 1e3)
+print(difftime(Sys.time(), t1, units = 'mins'))
+ 
+plot(glmnet_classifier1)
+print(paste("max AUC =", round(max(glmnet_classifier1$cvm), 4)))
+ 
+preds1 <- predict(glmnet_classifier1, dtm_test_tfidf1, type = 'response')[ ,1]
+auc(as.numeric(tweets_test1$sentiment), preds1)
+
+typeof(preds1)
+typeof(tweets_test1$sentiment)
+```
